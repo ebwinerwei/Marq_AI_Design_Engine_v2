@@ -61,3 +61,25 @@ class ReleasedRules(unittest.TestCase):
             self.assertEqual(glb(p,r)[:4],b'glTF')
             with zipfile.ZipFile(io.BytesIO(xlsx(p,r,'draft'))) as workbook:
                 self.assertIn(rid.encode(),workbook.read('xl/worksheets/sheet1.xml'))
+
+    def test_horizontal_half_span_boundaries_and_terminal_vertical_cut(self):
+        for pitch, kind, courses in [(600,'A',12),(750,'A',12),(751,'B',8),(900,'B',8)]:
+            p=fixture()
+            p.update(pitch=pitch,floors=[9001])
+            p['faces'][0]['spans']=[8000,10000]
+            r=solve(p)
+            self.assertEqual(r['type'],kind)
+            spans=[(0,4000),(4000,8000),(8000,13000),(13000,18000)]
+            for q in r['pieces']:
+                row,col,k=map(int,q['panel'].split('/')[1].split('.'))
+                lo,hi=spans[col-1]
+                top=((row-1)*courses+k-1)*pitch
+                self.assertEqual(q['poly'],rect(lo,top,hi-lo,min(9001-top,pitch)))
+        p=fixture()
+        p.update(mode='V',floors=[5100,6900])
+        p['faces'][0]['spans']=[9300]
+        r=solve(p)
+        for q in r['pieces']:
+            row,col,k=map(int,q['panel'].split('/')[1].split('.'))
+            x=((col-1)*15+k-1)*600
+            self.assertEqual(q['poly'],rect(x,0 if row==1 else 6900,min(600,9300-x),6900 if row==1 else 5100))
