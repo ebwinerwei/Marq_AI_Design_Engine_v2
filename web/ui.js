@@ -200,6 +200,7 @@ handle('aiImage',async()=>{
 });
 $('intentDiff').onchange=paint;
 function syncIntentPanel(){
+ $('jsonOut').textContent=p.intentPlanVersion&&(p.intentDraft||p.forkedIntentResult)?'保存版の参照 JSON（同じ環境用）':'工程 JSON 保存';
  $('intentPanel').hidden=p.intentPlanVersion!==1;
  $('photoChecks').hidden=p.intentPlanVersion!==1;
  $('pilotExportScope').hidden=p.intentPlanVersion!==1;
@@ -309,7 +310,14 @@ async function planIntent(via){
 handle('planIntent',()=>planIntent('local'));
 handle('intentApply',async()=>{if(p.intentPlanVersion)return planIntent('local');remember();const t=$('intent').value;if(/縦|竖|vertical|上層|留白/.test(t))p.mode='wave';if(/横|horizontal/.test(t))p.mode='H';const n=t.match(/(\d+(?:\.\d+)?)\s*[%％]/);if(n)p.faces[faceIndex].limit=+n[1];p.intent=t;fields();await calc()});
 handle('aiText',async()=>{if(p.intentPlanVersion)return planIntent('text');read();await ensureProject();const v=await call('ai',{pid,kind:'text',spec:p,payload:{intent:p.intent,meaning:r.meaning,allowedWaves:[...$('wave').options].map(v=>v.value)}});const panel=node('div');panel.append(node('p',v.narrative),node('p',String(v.mode||'')+' '+String(v.wave||'')));if(await modal('AI案と設計説明',panel)){remember();if(['H','V','wave'].includes(v.mode))p.mode=v.mode;if([...$('wave').options].some(o=>o.value===v.wave))p.wave=v.wave;p.aiNarrative=String(v.narrative||'');fields();await calc();$('meaning').textContent+=' '+p.aiNarrative}});
-handle('jsonOut',()=>{read();download('Marq-project.json',new Blob([JSON.stringify(p,null,2)],{type:'application/json'}))});
+handle('jsonOut',()=>{
+ read();let document=p;
+ if(p.intentPlanVersion&&(p.intentDraft||p.forkedIntentResult)){
+  if(!pid||!opened||dirty)throw Error('意図案を版として保存してから参照を書き出してください');
+  document={schema:'made-revision-reference-v1',project:pid,revision:opened,resultId:r.resultId,name:p.name};
+ }
+ download('Marq-project.json',new Blob([JSON.stringify(document,null,2)],{type:'application/json'}))
+});
 handle('edit',()=>editText('案件条件・立面・構件（mm）',JSON.stringify(p,null,2),async txt=>{const next=JSON.parse(txt);await call('solve',{spec:next,pid});remember();p=next;faceIndex=0;fields();await calc()}));
 handle('spaces',async()=>{const menu=node('div'),items=['アプローチ・歩車分離','外構・植栽の視認性','エントランスホール','エレベーターホール','共用廊下','事務室','休憩室・カフェテリア','トイレ'];const boxes=[];for(const s of items){const l=node('label',s+' '),v=node('input');v.value=p.spaces?.[s]||'';v.placeholder='素材・照明・サイン・確認者';l.append(v);menu.append(l);boxes.push([s,v])}if(await modal('Marq Aura / Inspire　空間別仕様',menu)){remember();p.spaces=Object.fromEntries(boxes.map(([s,v])=>[s,v.value]))}});
 const tourButton=button('外構・共用空間の3D検討',async()=>{
@@ -325,7 +333,17 @@ function legacy(d){
  if(d.schema==='marq-pattern-v1'){if(!Array.isArray(d.cells)||!d.params||d.cells.length!==d.params.cols*d.params.rows||d.cells.length>200000)throw Error('自由図案の形式が不正です');q.visualReference=d;q.importReview='自由図案は検討参考。ルールとの対応は未確認です';return q}
  return call('migrate',{document:d});
 }
-onfile('jsonIn',async f=>{const q=await legacy(JSON.parse(await f.text()));await call('solve',{spec:q});resetModel();modelLoaded=null;p=q;pid=null;opened=head=faceIndex=0;undo=[];refImg=background=plate=protectedLayer=null;fields();mark();await calc();status('新しい草案として読込。'+(q.importReview||'素材は再関連付けが必要です。'))});
+onfile('jsonIn',async f=>{
+ const doc=JSON.parse(await f.text());
+ if(doc.schema==='made-revision-reference-v1'){
+  const project=encodeURIComponent(doc.project),n=Number(doc.revision);
+  if(!Number.isSafeInteger(n)||n<1)throw Error('保存版の番号が不正です');
+  const source=await call('revision?pid='+project+'&n='+n);
+  if(source.result.resultId!==doc.resultId)throw Error('参照先の意図案と結果IDが一致しません');
+  const branch=await call('fork',{pid:doc.project,n,name:source.spec.name+' 複製'});
+  resetModel();modelLoaded=null;pid=branch.id;await history();await openRev(1);return;
+ }
+ const q=await legacy(doc);await call('solve',{spec:q});resetModel();modelLoaded=null;p=q;pid=null;opened=head=faceIndex=0;undo=[];refImg=background=plate=protectedLayer=null;fields();mark();await calc();status('新しい草案として読込。'+(q.importReview||'素材は再関連付けが必要です。'))});
 async function history(){
  if(!pid){$('history').textContent='版を保存すると比較・出力できます。';$('jobs').replaceChildren();return}
  const owner=pid,latest=await call('project?pid='+owner);if(owner!==pid)return;record=latest;const list=node('select');list.id='revSelect';selectOptions(list,record.revisions.map(v=>[v.n,'r'+v.n+' · '+v.state+' · '+v.author]));if(opened)list.value=opened;

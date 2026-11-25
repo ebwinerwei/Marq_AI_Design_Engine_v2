@@ -53,6 +53,7 @@ class Service(unittest.TestCase):
             return self.call('save',dict(pid=pid,expectedRevision=n,spec=p))
         old=save(0)
         p['intentPlanVersion']=1
+        self.assertEqual(self.call('solve',{'spec':p})['resultId'],old['resultId'])
         self.assertEqual(save(1)['resultId'],old['resultId'])
         draft=self.call('intent-plan',dict(pid=pid,n=2,faceId='A',goal='twoPeaks'))
         draft['approvedEditable']=['moduleLevels']

@@ -321,7 +321,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(migrate(b['document']));return
             if route=='solve' and self.command=='POST':
                 spec=b['spec']
-                if spec.get('intentPlanVersion') is not None:
+                from engine.intent import enabled
+                if enabled(spec) and ('intentDraft' in spec or 'forkedIntentResult' in spec):
                     project=get_project(c,b.get('pid',''),u)
                     self.reply(solve_revision(c,project,spec))
                 else:self.reply(solve(spec))
@@ -411,6 +412,8 @@ class Handler(BaseHTTPRequestHandler):
                 spec=maprefs(spec)
                 if 'intentFacts' in result:
                     # The immutable source belongs to the old project. Carry its verified selection into the branch.
+                    for label in result['labels']:
+                        if label.get('asset') in remap:label['asset']=remap[label['asset']]
                     spec.pop('intentDraft',None)
                     spec['forkedIntentResult']=result['resultId']
                 else:result=solve(spec)
