@@ -5,7 +5,15 @@ def commercial(cfg,kind,body):
     if kind=='text':
         url='https://api.openai.com/v1/responses'
         schema={'type':'object','properties':{'narrative':{'type':'string'},'mode':{'type':'string','enum':['H','V','wave']},'wave':{'type':'string','enum':['234565432','234323432','654323456','234555432','234567']}},'required':['narrative','mode','wave'],'additionalProperties':False}
-        data=json.dumps({'model':model,'store':False,'instructions':'建築設計の日本語説明を提案する。確定済みの数量や所在地の法令適合を推測しない。','input':json.dumps(body,ensure_ascii=False),'text':{'format':{'type':'json_schema','name':'marq_design','strict':True,'schema':schema}}}).encode()
+        instructions='建築設計の日本語説明を提案する。確定済みの数量や所在地の法令適合を推測しない。'
+        if body.get('task')=='intent-regions-v1':
+            def regions(keys):
+                return {'type':'array','items':{'type':'object','properties':{k:{'type':'number'} for k in keys},
+                        'required':keys,'additionalProperties':False}}
+            schema={'type':'object','properties':{'quietIntervals':regions(['start','end']),
+                    'peaks':regions(['center','width','strength'])},'required':['quietIntervals','peaks'],'additionalProperties':False}
+            instructions='設計者が確認する意図案として、許可された余白とピークのみ提案してください。各4件まで、位置・幅・強度は0〜1。正の幅としてください。'
+        data=json.dumps({'model':model,'store':False,'instructions':instructions,'input':json.dumps(body,ensure_ascii=False),'text':{'format':{'type':'json_schema','name':'marq_design','strict':True,'schema':schema}}}).encode()
         content='application/json'
     else:
         url='https://api.openai.com/v1/images/edits'

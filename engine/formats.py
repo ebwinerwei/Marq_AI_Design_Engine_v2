@@ -70,6 +70,19 @@ def xlsx(p,r,state):
         quantity.append([col,length,width,num,qty,sample['status']])
     sheets.append(('発注検討',quantity))
     sheets.append(('納まり・審査',[['項目','内容']]+[[t['face'],f"{t['length']:.2f} mm 見切り"] for t in r['trims']]+[['要確認',x] for x in r['issues']]+[['設計説明',r['meaning']]]))
+    if 'intentFacts' in r:
+        facts=r['intentFacts']
+        comparison=[['比較項目','保存版の値'],['対象立面',facts['faceId']],['比較元の版',facts['baseRevision']],
+                    ['比較元の結果',facts['baseResultId']],['結果',r['resultId']],['事実ID',facts['factId']],
+                    ['規則の内容 SHA-256',facts['ruleHash']],['出典',' / '.join(facts['source'])],
+                    ['比較元アクセント m²',facts['baseAccentMM2']/1e6],['選定案アクセント m²',facts['accentMM2']/1e6],
+                    ['分母',facts['denominator']],['分母 m²',facts['denominatorMM2']/1e6],
+                    ['設定上限 %',facts['limitPercent'] if facts['limitPercent'] is not None else '未設定'],
+                    ['面積上限の判定',facts['limitStatus']],['状態',state],['設計説明',r['meaning']]]
+        comparison.extend([['出力版',r.get('dependencies',{}).get('revisionNumber','試算')],['親版',r.get('dependencies',{}).get('parentRevision','試算')],
+                           ['幾何ハッシュ',r.get('dependencies',{}).get('geometryHash','試算')]])
+        comparison.extend(['仕上変更板',panel] for panel in facts['changedPanels'])
+        sheets.append(('意図案比較',comparison))
     return xmlfile(sheets)
 
 def world(f,H,xy):
@@ -150,9 +163,17 @@ def dxf(p,r,state):
         z=0
         for fh in f.get('floors',p['floors']):
             line('LEVEL',(cursor-300,z),(cur,z));text('LEVEL',cursor-1200,z,z);z+=fh
+        if p.get('intentPlanVersion')==1:
+            if state!='APPROVED':text('TITLE',cursor,-1450,'DRAFT / DESIGN COORDINATION ONLY',300)
+            contour=f.get('outline') or [[0,0],[s['width'],0],[s['width'],s['height']],[0,s['height']]]
+            for a,b in edges([[cursor+u,h[fid]-v] for u,v in contour]):line('WALL',a,b)
         for feat in f.get('features',[]):
             points=[[cursor+u,h[fid]-v] for u,v in feat['poly']]
-            for a,b in edges(points):line('F_'+feat['kind'],a,b)
+            layer='F_'+feat['kind']
+            if p.get('intentPlanVersion')==1:
+                if feat['kind'] in ('opening','band','entrance','berth','slope') or (feat['kind']=='smoke' and feat.get('physicalHole')):layer='OPENING'
+                elif feat['kind'] in ('logo','ramp'):layer=feat['kind'].upper()
+            for a,b in edges(points):line(layer,a,b)
         cursor+=s['width']+4000
     palette={'Silver':9,'Slate Navy':5,'White':7,'Electric Blue':5,'Dark Gray':8,'Medium Gray':9,'Column':8}
     for a in r['pieces']:

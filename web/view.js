@@ -110,3 +110,11 @@ export function spaceView(item){
  else{box([w,.09,.08],[0,h*.64,-d/2+.1],item.accent);for(let i=0;i<3;i++)box([.12,.08,d*.65],[(i-1)*w*.28,h-.08,0],'#fff4d6')}
  scene.add(interior);frame(interior);render()
 }
+
+export function projectWorldMM(xyz){
+ if(!camera)throw Error('全周3Dで確認視点を選択してください');
+ const point=new T.Vector3(...xyz).multiplyScalar(.001).applyMatrix4(camera.matrixWorldInverse);
+ if(point.z>=-camera.near)throw Error('基準点がカメラの背面または手前にあります');
+ point.applyMatrix4(camera.projectionMatrix);
+ return [(point.x+1)/2,(1-point.y)/2];
+}

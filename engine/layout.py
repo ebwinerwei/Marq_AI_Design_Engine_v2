@@ -146,7 +146,7 @@ def prepared(f,t,p,H,mh,mw,heights):
     order={'whole':0,'silver':1,'Dark Gray':2,'Medium Gray':2,'Column':2,'Electric Blue':3,'hole':4,'hide':5}
     return sorted(effects,key=lambda entry:order[entry[0]]),labels,trims
 
-def calculate(p,seed):
+def calculate(p,seed,selected_levels=None):
     pitch=positive(p['pitch']);mode=p['mode'];stock=p['stock']
     if mode not in ('H','V','wave') or stock not in ('cs','dry'):raise ValueError('工法・用途が不正です')
     t='A' if mode=='H' and pitch<=750 else 'B' if mode=='H' else 'C'
@@ -179,7 +179,7 @@ def calculate(p,seed):
             heights=list(reversed(local));heights[0]+=positive(f['parapet']) if f.get('parapet') else 0
             H=sum(heights);rows=heights if t=='C' else [mh]*math.ceil(H/mh)
             if len(rows)*len(cols)*n>100000:raise ValueError('板数が上限を超えています')
-            lv=levels(p,group,len(rows),cols,wave,seed)
+            lv=selected_levels if selected_levels is not None else levels(p,group,len(rows),cols,wave,seed)
             width=sum(f['spans']);fid=f['id'];end=offset+width
             outline=polygon(f.get('outline') or rect(0,0,width,H));simple=outline==rect(0,0,width,H)
             moduleW=15*pitch if t=='C' else f['spans'][0]/2
@@ -275,6 +275,8 @@ def calculate(p,seed):
     return dict(type=t,pieces=allpieces,faces=summary,labels=labels,trims=trims,issues=issues,cost=cost if used<=costs.keys() else None,seed=seed)
 
 def solve(p):
+    if p.get('intentPlanVersion') is not None and ('intentDraft' in p or 'forkedIntentResult' in p):
+        raise ValueError('意図案の再計算には案件内の保存版が必要です')
     from .policy import normalize
     p=normalize(p)
     seed=int(p.get('seed',0));best=None
@@ -282,6 +284,9 @@ def solve(p):
         candidate=calculate_groups(p,seed+i)
         if best is None or len(candidate['issues'])<len(best['issues']):best=candidate
         if not best['issues']:break
+    return finish_solution(p,best)
+
+def finish_solution(p,best):
     best['status']='feasible' if not best['issues'] else ('searchLimit' if p['mode']=='wave' else 'conflict')
     from collections import defaultdict
     from .geometry import perimeter
@@ -298,17 +303,18 @@ def solve(p):
 _group_cache={}
 import threading
 _cache_lock=threading.Lock()
-def calculate_groups(p,seed):
+def calculate_groups(p,seed,selected=None):
     groups={}
     for f in p['faces']:groups.setdefault(f.get('group',f['id']),[]).append(f)
     merged=dict(pieces=[],faces=[],labels=[],trims=[],issues=[],seed=seed,cost=0)
     for faces in groups.values():
         base={k:v for k,v in p.items() if k in ('seed','pitch','mode','stock','floors','rules','wave','waveSequence','tenantTop','scan','blankCols','mirrorBits','locks','limit','prices')}
         base['faces']=faces
-        key=digest([base,seed])
+        grid=selected.get(faces[0]['id']) if selected else None
+        key=digest([base,seed] if grid is None else [base,seed,grid])
         with _cache_lock:part=_group_cache.get(key)
         if part is None:
-            part=calculate(base,seed)
+            part=calculate(base,seed,grid)
             if len(part['pieces'])<12000:
                 with _cache_lock:
                     if len(_group_cache)>=10:_group_cache.pop(next(iter(_group_cache)))

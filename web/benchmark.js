@@ -3,3 +3,9 @@ export function evaluate(m){
  const base=m.manualHours*m.hourlyRate+m.manualVendor,now=m.systemHours*m.hourlyRate+m.systemVendor+m.running;
  return {hoursSaved:m.manualHours-m.systemHours,drawingReduction:pct(m.manualHours,m.systemHours),daysReduction:pct(m.manualDays,m.systemDays),vendorReduction:pct(m.manualVendor,m.systemVendor),netSaving:base-now,breakEven:base>now?Math.ceil(m.investment/(base-now)):null}
 }
+
+export function annualReturn(m,projects,fixed){
+ const perProject=evaluate(m).netSaving;
+ const annualNet=projects*perProject-fixed;
+ return {perProject,annualNet,years:annualNet>0?m.investment/annualNet:null};
+}

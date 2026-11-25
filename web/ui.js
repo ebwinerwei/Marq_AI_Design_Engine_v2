@@ -1,7 +1,7 @@
 import {masterForm,patternComparison} from './master-form.js';
 import {rectangularProject,field} from './project-forms.js';
-import {siteSize,placement,controlsForEdit,finishEdit} from './site-photo.js';
-import {colors,draw3,render,lighting,loadModel,bindSurface,calibration,capture,capturePass,getCamera,setCamera,resetModel,spaceView} from './view.js';
+import {siteSize,placement,controlsForEdit,finishEdit,verifyProtected,checkpointResidual} from './site-photo.js';
+import {colors,draw3,render,lighting,loadModel,bindSurface,calibration,capture,capturePass,getCamera,setCamera,projectWorldMM,resetModel,spaceView} from './view.js';
 const $=id=>document.getElementById(id),prefix='/api/made/v1/',clone=v=>JSON.parse(JSON.stringify(v));
 const box=(x,y,w,h)=>[[x,y],[x+w,y],[x+w,y+h],[x,y+h]];
 function example(){
@@ -27,9 +27,10 @@ async function modal(title,content,yes='適用'){
  d.showModal();return new Promise(ok=>d.addEventListener('close',()=>ok(d.returnValue==='ok'),{once:true}));
 }
 async function editText(title,value,cb){const el=node('textarea');el.value=value;if(await modal(title,el))await cb(el.value)}
-function mark(){dirty=true;serial++;$('version').textContent=(opened?'r'+opened+' · ':'')+'編集中'}
+function mark(){dirty=true;if(p.intentPlanVersion)showIntentFacts(null);serial++;$('version').textContent=(opened?'r'+opened+' · ':'')+'編集中'}
 function remember(){undo.push(clone(p));if(undo.length>15)undo.shift();mark()}
 function fields(){
+ $('intentPilot').checked=p.intentPlanVersion===1;syncIntentPanel();
  const f=p.faces[faceIndex];for(const id of ['name','stock','mode','pitch','scan','wave','rules','seed','intent'])$(id).value=p[id]??'';
  $('floors').value=(f.floors||p.floors).join(',');$('spans').value=f.spans.join(',');$('parapet').value=f.parapet||0;$('limit').value=f.limit??'';$('tenant').checked=!!p.tenantTop;$('consent').checked=!!p.externalConsent;
  selectOptions($('face'),p.faces.map((s,i)=>[i,s.id]));$('face').value=faceIndex;
@@ -50,14 +51,22 @@ function paint(){
  for(const a of r.pieces){if(a.face!==s.face)continue;path(a.poly);ctx.fillStyle=colors[a.finish];ctx.globalAlpha=a.hidden?.25:1;ctx.fill()}
  ctx.globalAlpha=1;ctx.beginPath();for(const seam of r.seams||[])if(seam.face===s.face)for(const [a,b] of seam.segments){ctx.moveTo(...a);ctx.lineTo(...b)}ctx.strokeStyle='#677783';ctx.lineWidth=.45/k;ctx.stroke();
  for(const m of r.labels.filter(m=>m.face===s.face)){const [x,y]=m.poly[0],w=m.poly[2][0]-x,h=m.poly[2][1]-y;const berth=m.kind==='berth',height=berth?h*.2:h;ctx.fillStyle=berth?'#15202d':'#fff';ctx.fillRect(x,berth?y-height:y,w,height);ctx.font='bold '+Math.max(1,height*.7)+'px sans-serif';ctx.textAlign='center';ctx.fillStyle=berth?'#fff':'#1b43b0';ctx.fillText(m.text,x+w/2,berth?y-height*.2:y+height*.78,w*.94)}
+ if(p.intentPlanVersion&&r.intentFacts?.faceId===s.face&&$('intentDiff').checked){
+  const changed=new Set(r.intentFacts.changedPanels);ctx.save();
+  ctx.strokeStyle='#dd661d';ctx.lineWidth=2/k;
+  for(const a of r.pieces)if(changed.has(a.panel)){path(a.poly);ctx.stroke()}
+  ctx.fillStyle='rgba(33,112,174,.12)';
+  for(const q of r.intentFacts.quietIntervals||[])ctx.fillRect(q.start*s.width,0,(q.end-q.start)*s.width,s.height);
+  ctx.restore();
+ }
  if(refImg){ctx.globalAlpha=.25;ctx.drawImage(refImg,0,0,s.width,s.height);ctx.globalAlpha=1}
  if(outline?.length){path(outline);ctx.strokeStyle='#e3482e';ctx.lineWidth=2/k;ctx.stroke()}
  ctx.restore();ctx.fillStyle='#38526a';ctx.font='18px sans-serif';ctx.textAlign='left';ctx.fillText(s.face+'立面  /  '+s.width.toLocaleString()+' × '+s.height.toLocaleString()+' mm',20,c.height-14);
 }
-function metrics(){const s=r.faces.find(v=>v.face===p.faces[faceIndex].id)||r.faces[0];$('metric').replaceChildren(...[['モジュール',r.type],['原板 ID',s.panels],['仕上純量',(Object.values(s.finishes).reduce((a,b)=>a+b,0)/1e6).toFixed(2)+' m²'],['アクセント',s.ratio.toFixed(2)+' %'],['制約',r.status==='feasible'?'適合候補':'要確認']].map(([a,b])=>{const d=node('div');d.append(node('small',a),node('strong',b));return d}));$('meaning').textContent=r.meaning}
+function metrics(){if(p.intentPlanVersion)showIntentFacts(r.intentFacts);const s=r.faces.find(v=>v.face===p.faces[faceIndex].id)||r.faces[0];$('metric').replaceChildren(...[['モジュール',r.type],['原板 ID',s.panels],['仕上純量',(Object.values(s.finishes).reduce((a,b)=>a+b,0)/1e6).toFixed(2)+' m²'],['アクセント',s.ratio.toFixed(2)+' %'],['制約',r.status==='feasible'?(r.intentFacts?'計算済み':'適合候補'):'要確認']].map(([a,b])=>{const d=node('div');d.append(node('small',a),node('strong',b));return d}));$('meaning').textContent=r.meaning}
 let need3=true;
 async function calc(){
- read();const n=++serial;const result=await call('solve',{spec:p});if(n!==serial)return false;r=result;protectedLayer=null;need3=true;paint();metrics();if(active==='scene')view3();
+ read();const n=++serial;const result=await call('solve',{spec:p,pid});if(n!==serial)return false;r=result;protectedLayer=null;need3=true;paint();metrics();if(active==='scene')view3();
  status(r.issues.join('\n')||'計算済み · '+r.resultId);return true;
 }
 function view3(){if(!r)return;try{if(need3){draw3(p,r,assetUrl);if(p.camera)setCamera(p.camera);need3=false}else render()}catch(e){status('3D表示：'+e.message+'。展開立面を利用できます。')}}
@@ -100,7 +109,7 @@ async function compose(){
  if(!protectedLayer){await page('scene');view3();protectedLayer=await image(capture(true));await page('photo')}
  const c=$('composition'),[w,h]=siteSize(background);c.width=w;c.height=h;
  const ctx=c.getContext('2d'),settings=photoSettings();
- Object.assign(p.photo,settings);
+ Object.assign(p.photo,settings);showCheckpoints();
  if(p.photo.final && p.photo.binding===photoBinding()){
   const owner=p,im=await image(assetUrl(p.photo.final));
   if(owner===p&&p.photo.binding===photoBinding())ctx.drawImage(im,0,0,w,h);
@@ -111,9 +120,54 @@ async function compose(){
  if(foreground&&p.photo.foreground)ctx.drawImage(foreground,0,0,w,h);
 }
 function photoSettings(){return {cx:+$('cx').value,cy:+$('cy').value,scale:+$('scale').value}}
-function photoBinding(){return JSON.stringify([r.resultId,p.photo.background,p.photo.foreground,photoSettings(),p.camera,p.light,p.model])}
+function photoBinding(){
+ const parts=[r.resultId,p.photo.background,p.photo.foreground,photoSettings(),p.camera,p.light,p.model];
+ if(p.intentPlanVersion&&protectedLayer)parts.push(protectedLayer.width,protectedLayer.height);
+ return JSON.stringify(parts)
+}
 handle('compose',async()=>{protectedLayer=null;p.camera=getCamera()||p.camera;delete p.photo?.binding;await compose();mark()});
 for(const id of ['cx','cy','scale'])$(id).oninput=()=>{mark();compose().catch(e=>status(e.message))};
+function registrationBinding(){
+ return JSON.stringify([r.resultId,p.photo.background,photoSettings(),p.camera,p.model,protectedLayer.width,protectedLayer.height]);
+}
+handle('recordCheck',async()=>{
+ if(!background)throw Error('写真を読み込んでください');
+ await page('scene');view3();p.camera=getCamera();protectedLayer=await image(capture(true));await page('photo');await compose();
+ const current=p,stamp=serial,binding=registrationBinding(),div=node('div'),canvas=$('composition');
+ const [w,h]=[canvas.width,canvas.height];
+ div.append(node('p',w+' × '+h+' px ／ 立面モデルの世界座標は Y が上です。カメラの調整に使っていない点を独立検査点に指定してください。'));
+ const role=field(div,'点の用途','check',[['check','独立検査点'],['control','位置合わせに使用した点']]);
+ const inputs=['世界 X mm','世界 Y mm','世界 Z mm','画像 X px','画像 Y px'].map(label=>field(div,label,''));
+ for(const input of inputs){input.type='number';input.step='any'}
+ if(!await modal('写真の対応点を記録',div,'再投影誤差を計算'))return;
+ if(p!==current||serial!==stamp||binding!==registrationBinding())throw Error('視点または写真が変わりました');
+ if(inputs.some(input=>!input.value.trim()))throw Error('5つの座標を入力してください');
+ const numbers=inputs.map(input=>Number(input.value));
+ const result=checkpointResidual(projectWorldMM,numbers.slice(0,3),numbers.slice(3),w,h,protectedLayer,photoSettings());
+ const existing=p.photo.registration?.binding===binding?p.photo.registration.points:[];
+ if(existing.length>=64)throw Error('対応点は1視点64点までです');
+ remember();p.photo.registration={binding,width:w,height:h,points:[...existing,{...result,role:role.value}]};
+ showCheckpoints();status('この視点の対応点を記録しました。版を保存してください');
+});
+function showCheckpoints(){
+ if(!p.intentPlanVersion||!background||!protectedLayer)return;
+ const registration=p.photo?.registration,out=$('checkResidual');
+ if(!registration){out.textContent='目視合わせ';return}
+ if(registration.binding!==registrationBinding()){out.textContent='視点・画幅が変わりました。再校正してください。';return}
+ const checks=registration.points.filter(q=>q.role==='check');
+ const rms=checks.length?Math.sqrt(checks.reduce((total,q)=>total+q.errorPX**2,0)/checks.length):null;
+ out.textContent='対応点 '+registration.points.length+' 点 ／ 独立検査点 '+checks.length+' 点'+(rms===null?' ／ 目視合わせ':' ／ RMS '+rms.toFixed(2)+' px');
+}
+handle('photoRights',async()=>{
+ if(!p.photo?.background)throw Error('背景写真を読み込んでください');
+ const div=node('div'),source=field(div,'権利者・利用根拠（許諾番号等）',p.photo.rights?.source||'');
+ const consent=node('input');consent.type='checkbox';const label=node('label');
+ label.append(consent,document.createTextNode('背景・合成図・深度・保護マスクを承認済み端点に送信できる'));div.append(label);
+ if(!await modal('写真と前景の使用許諾',div))return;
+ if(!source.value.trim()||source.value.length>300)throw Error('利用根拠を300文字以内で記入してください');
+ remember();p.photo.rights={source:source.value.trim(),external:consent.checked,background:p.photo.background,foreground:p.photo.foreground||null};
+ status('許諾範囲を記録しました。版を保存してください');
+});
 handle('photoOut',async()=>{await compose();download('Marq-site-'+r.resultId+'.png',$('composition').toDataURL())});
 handle('aiImage',async()=>{
  if(!background)throw Error('計画地の空撮写真を指定してください');
@@ -127,24 +181,136 @@ handle('aiImage',async()=>{
   let rgba,z;
   try{if(need3)throw Error('外観3Dの再描画に失敗しました');rgba=capture(true);z=capturePass('siteDepth');p.camera=getCamera()}finally{await page('photo')}
   const [building,depth]=await Promise.all([image(rgba),image(z)]);
+  if(p.intentPlanVersion)protectedLayer=building;
   const fg=p.photo.foreground?foreground:null;
   const control=controlsForEdit(background,building,depth,fg,photoSettings());
   const binding=photoBinding(),stamp=serial;
   status('建物の輪郭・深度を固定してAI合成中…');
-  const response=await call('ai',{pid,kind:'image',spec:p,payload:{...control.payload,intent:p.intent,environment:p.light.sky}});
+  const response=await call('ai',{pid,n:opened,kind:'image',spec:p,payload:{...control.payload,intent:p.intent,environment:p.light.sky}});
   const output=finishEdit(await image(response.image),control,building,fg);
+  const check=p.intentPlanVersion?verifyProtected(output,control,building,fg):null;
   const blob=await new Promise(ok=>output.toBlob(ok,'image/png'));
   if(owner!==p||stamp!==serial||binding!==photoBinding())throw Error('生成中に設計が変更されました。再実行してください');
   const final=await uploadFile(new File([blob],'site-composite.png',{type:'image/png'}));
   if(owner!==p||binding!==photoBinding())throw Error('配置が変更されました。再実行してください');
+  if(check)p.photo.pixelCheck={...check,binding};
   p.photo.final=final;p.photo.binding=binding;protectedLayer=building;
   await compose();status('AI合成が完了しました。PNG出力または版を保存してください')
  }finally{btn.disabled=false}
 });
-handle('intentApply',async()=>{remember();const t=$('intent').value;if(/縦|竖|vertical|上層|留白/.test(t))p.mode='wave';if(/横|horizontal/.test(t))p.mode='H';const n=t.match(/(\d+(?:\.\d+)?)\s*[%％]/);if(n)p.faces[faceIndex].limit=+n[1];p.intent=t;fields();await calc()});
-handle('aiText',async()=>{read();await ensureProject();const v=await call('ai',{pid,kind:'text',spec:p,payload:{intent:p.intent,meaning:r.meaning,allowedWaves:[...$('wave').options].map(v=>v.value)}});const panel=node('div');panel.append(node('p',v.narrative),node('p',String(v.mode||'')+' '+String(v.wave||'')));if(await modal('AI案と設計説明',panel)){remember();if(['H','V','wave'].includes(v.mode))p.mode=v.mode;if([...$('wave').options].some(o=>o.value===v.wave))p.wave=v.wave;p.aiNarrative=String(v.narrative||'');fields();await calc();$('meaning').textContent+=' '+p.aiNarrative}});
+$('intentDiff').onchange=paint;
+function syncIntentPanel(){
+ $('intentPanel').hidden=p.intentPlanVersion!==1;
+ $('photoChecks').hidden=p.intentPlanVersion!==1;
+ $('pilotExportScope').hidden=p.intentPlanVersion!==1;
+ $('clearIntent').hidden=!p.intentDraft&&!p.forkedIntentResult;
+}
+function showIntentFacts(facts){
+ syncIntentPanel();
+ const current=facts?.faceId===p.faces[faceIndex]?.id, chart=$('density');
+ chart.hidden=!current;
+ $('planFacts').textContent=current
+  ? r.meaning+' 分母 '+(facts.denominator==='visible'?'可視':'純面積')+' '+(facts.denominatorMM2/1e6).toFixed(2)+' m² ／ '+facts.source.join('・')+
+    (facts.search==='budgetFeasible'?' ／ 計算予算内の検証済み候補':'')+' ／ 青線：目標、黒線：実面積'
+  : (p.intentDraft?'保存版の対象面と計算結果を確認してください。':'この案件を保存後、対象立面と計画の狙いを選択してください。');
+ if(!current)return;
+ const ctx=chart.getContext('2d');ctx.clearRect(0,0,chart.width,chart.height);
+ for(const [key,color] of [['target','#2866ba'],['actual','#202c37']]){
+  ctx.strokeStyle=ctx.fillStyle=color;ctx.lineWidth=2;ctx.beginPath();
+  facts.profile.forEach((v,i)=>{const x=5+v.u*(chart.width-10),y=chart.height-5-v[key]*(chart.height-10);
+   if(i)ctx.lineTo(x,y);else ctx.moveTo(x,y);
+   ctx.fillRect(x-2,y-2,4,4);
+  });ctx.stroke();
+ }
+}
+function releaseIntent(){
+ delete p.intentDraft;delete p.forkedIntentResult;
+ $('clearIntent').hidden=true;
+}
+$('intentPilot').onchange=async()=>{
+ try{
+  remember();
+  if($('intentPilot').checked){p.intentPlanVersion=1;await ensureProject()}
+  else{releaseIntent();delete p.intentPlanVersion}
+  fields();await calc();
+ }catch(e){status(e.message)}
+};
+handle('clearIntent',async()=>{remember();releaseIntent();fields();await calc()});
+handle('channelSettings',async()=>{
+ await ensureProject();const owner=p,channels=await call('pilot-channels',{pid});
+ const div=node('div'),entries=[];
+ for(const [kind,ch] of Object.entries(channels)){
+  const label=node('label'),box=node('input');box.type='checkbox';box.checked=p.channelGrants?.[kind]===ch.id;
+  label.append(box,document.createTextNode([kind==='text'?'意図の範囲':'写真編集',ch.account,ch.model,ch.region,ch.expires].join(' ／ ')));
+  div.append(label);entries.push([kind,ch.id,box]);
+ }
+ if(!entries.length)div.append(node('p','契約・合成サンプルを検証済みの接続先はありません。ローカル計画を利用できます。'));
+ if(!await modal('案件で許可する接続先',div)||p!==owner)return;
+ remember();p.channelGrants=Object.fromEntries(entries.filter(row=>row[2].checked).map(([kind,id])=>[kind,id]));
+ status('接続先を記録しました。外部送信の許可とともに版を保存してください');
+});
+async function planIntent(via){
+ if(!pid||!opened||dirty)throw Error('先に現在の設計条件を版として保存してください');
+ const owner=pid,revision=opened,stamp=serial,face=p.faces[faceIndex].id;
+ const draft=await call('intent-plan',{pid,n:revision,faceId:face,goal:$('intentGoal').value,via});
+ const div=node('div');
+ div.append(node('p',face+'面 ／ r'+revision+' ／ 道路からの視点 ／ '+draft.evidenceRefs.join('・')));
+ if(draft.goal==='entrance')div.append(node('p',draft.anchors.length?'この面の保存済み入口位置を参照します。':'入口の登録がないため、中央を仮の余白にしています。位置を確認してください。'));
+ const controls=[],handles=[];
+ function percent(label,item,key,min=0){
+  const input=field(div,label+'（左端を0とする %）',String(+(item[key]*100).toFixed(4)));
+  input.type='number';input.step='any';input.min=min;input.max=100;
+  if(key!=='width')handles.push({input,key,label});
+  controls.push(()=>{if(!input.value||!input.checkValidity())throw Error(label+'を確認してください');item[key]=Number(input.value)/100});
+ }
+ for(const q of draft.quietIntervals){percent('余白の開始',q,'start');percent('余白の終了',q,'end')}
+ draft.peaks.forEach((peak,i)=>{percent('ピーク '+(i+1)+' の中心',peak,'center');percent('ピーク '+(i+1)+' の幅',peak,'width',.0001)});
+ const strip=node('canvas');strip.width=560;strip.height=66;strip.style.touchAction='none';div.append(strip);
+ function drawHandles(){
+  const ctx=strip.getContext('2d');ctx.clearRect(0,0,strip.width,strip.height);
+  ctx.fillStyle='#e7edf1';ctx.fillRect(8,28,544,10);
+  for(const h of handles){
+   const x=8+5.44*Number(h.input.value),y=h.key==='center'?18:47;
+   ctx.fillStyle=h.key==='center'?'#245dba':'#426c57';ctx.beginPath();ctx.arc(x,y,6,0,Math.PI*2);ctx.fill();
+  }
+ }
+ handles.forEach(h=>h.input.addEventListener('input',drawHandles));drawHandles();
+ let dragged=null;
+ function coordinates(e){
+  const rect=strip.getBoundingClientRect();
+  return [(e.clientX-rect.left)*560/rect.width,(e.clientY-rect.top)*66/rect.height];
+ }
+ strip.onpointerdown=e=>{
+  const [x,y]=coordinates(e);
+  dragged=handles.find(h=>Math.hypot(x-8-5.44*Number(h.input.value),y-(h.key==='center'?18:47))<14);
+  if(dragged)strip.setPointerCapture(e.pointerId);
+ };
+ strip.onpointermove=e=>{
+  if(!dragged)return;
+  dragged.input.value=Math.max(0,Math.min(100,(coordinates(e)[0]-8)/5.44)).toFixed(1);drawHandles();
+ };
+ strip.onpointerup=strip.onpointercancel=()=>{dragged=null};
+ const permit=node('input'),strict=node('input');permit.type=strict.type='checkbox';
+ if(p.mode==='wave'){
+  const label=node('label');label.append(permit,document.createTextNode('別冊の適用範囲を確認し、この面の番手変更を許可'));div.append(label);
+  const layer=node('label');layer.append(strict,document.createTextNode('上下の強調モジュールで同じ番手を禁止する'));div.append(layer);
+ }else div.append(node('p','指定配列を固定し、目標と実際の分布を比較します。'));
+ if(!await modal('立面の意図計画',div,'条件を確定して試算'))return;
+ controls.forEach(fn=>fn());if(permit.checked)draft.approvedEditable=['moduleLevels'];draft.strictLayers=strict.checked;
+ const current=()=>pid===owner&&opened===revision&&serial===stamp&&p.faces[faceIndex].id===face;
+ if(!current())throw Error('対象版または立面が変更されました');
+ const next={...p,intentDraft:draft};
+ let candidate;
+ try{candidate=await call('solve',{pid,spec:next})}
+ catch(error){throw Error('新しい意図案は未作成です。画面は直前の版です。 '+error.message)}
+ if(!current())throw Error('計算中に条件が変わりました');
+ remember();p=next;r=candidate;need3=true;protectedLayer=null;fields();paint();metrics();status(candidate.issues.join(' ／ ')||'意図案を計算しました。版を保存して比較表を出力できます。');
+}
+handle('planIntent',()=>planIntent('local'));
+handle('intentApply',async()=>{if(p.intentPlanVersion)return planIntent('local');remember();const t=$('intent').value;if(/縦|竖|vertical|上層|留白/.test(t))p.mode='wave';if(/横|horizontal/.test(t))p.mode='H';const n=t.match(/(\d+(?:\.\d+)?)\s*[%％]/);if(n)p.faces[faceIndex].limit=+n[1];p.intent=t;fields();await calc()});
+handle('aiText',async()=>{if(p.intentPlanVersion)return planIntent('text');read();await ensureProject();const v=await call('ai',{pid,kind:'text',spec:p,payload:{intent:p.intent,meaning:r.meaning,allowedWaves:[...$('wave').options].map(v=>v.value)}});const panel=node('div');panel.append(node('p',v.narrative),node('p',String(v.mode||'')+' '+String(v.wave||'')));if(await modal('AI案と設計説明',panel)){remember();if(['H','V','wave'].includes(v.mode))p.mode=v.mode;if([...$('wave').options].some(o=>o.value===v.wave))p.wave=v.wave;p.aiNarrative=String(v.narrative||'');fields();await calc();$('meaning').textContent+=' '+p.aiNarrative}});
 handle('jsonOut',()=>{read();download('Marq-project.json',new Blob([JSON.stringify(p,null,2)],{type:'application/json'}))});
-handle('edit',()=>editText('案件条件・立面・構件（mm）',JSON.stringify(p,null,2),async txt=>{const next=JSON.parse(txt);await call('solve',{spec:next});remember();p=next;faceIndex=0;fields();await calc()}));
+handle('edit',()=>editText('案件条件・立面・構件（mm）',JSON.stringify(p,null,2),async txt=>{const next=JSON.parse(txt);await call('solve',{spec:next,pid});remember();p=next;faceIndex=0;fields();await calc()}));
 handle('spaces',async()=>{const menu=node('div'),items=['アプローチ・歩車分離','外構・植栽の視認性','エントランスホール','エレベーターホール','共用廊下','事務室','休憩室・カフェテリア','トイレ'];const boxes=[];for(const s of items){const l=node('label',s+' '),v=node('input');v.value=p.spaces?.[s]||'';v.placeholder='素材・照明・サイン・確認者';l.append(v);menu.append(l);boxes.push([s,v])}if(await modal('Marq Aura / Inspire　空間別仕様',menu)){remember();p.spaces=Object.fromEntries(boxes.map(([s,v])=>[s,v.value]))}});
 const tourButton=button('外構・共用空間の3D検討',async()=>{
  const sel=node('select');selectOptions(sel,['アプローチ','エントランスホール','エレベーターホール','共用廊下','事務室','休憩室・カフェテリア','トイレ'].map(v=>[v,v]));
@@ -203,6 +369,7 @@ handle('compare',async()=>{await calc();const rr=await call('revision?pid='+pid+
 document.querySelectorAll('[data-export]').forEach(b=>b.onclick=async()=>{try{const n=chosen(),kind=b.dataset.export;let args={};
  if(dirty && !await modal('保存版 r'+n+' を出力',node('p','画面に未保存の変更があります。編集内容はこの出力には入りません。最新案を出す場合は閉じて版を保存してください。'),'r'+n+' で続行'))return;
  if(kind==='cg'){const t=node('input'),d=node('input'),msg=node('textarea'),div=node('div');t.placeholder='制作チーム';d.type='date';msg.placeholder='用途・色空間・撮影条件・納品仕様';div.append(t,d,msg);const rev=await call('revision?pid='+pid+'&n='+n);const allowed=[];for(const id of rev.spec.assets||[]){const l=node('label'),check=node('input');check.type='checkbox';l.append(check,document.createTextNode(record.files.find(f=>f.id===id)?.name||id));div.append(l);allowed.push([id,check])}const consent=node('label',' 宛先・選択素材の利用条件を確認しました'),ack=node('input');ack.type='checkbox';consent.prepend(ack);div.append(consent);if(!await modal('r'+n+' の8K制作を依頼',div,'発注'))return;if(!ack.checked)throw Error('委託条件を確認してください');args={team:t.value,due:d.value,brief:msg.value,assets:allowed.filter(a=>a[1].checked).map(a=>a[0]),rightsConfirmed:true}}
+ if(p.intentPlanVersion&&$('exportScope').value==='approved')args.approvedOnly=true;
  const job=await call('job',{pid,n,kind,args});status('受付 '+job.id+' · r'+n);
  for(let i=0;i<40;i++){await new Promise(ok=>setTimeout(ok,300));await history();const j=record.jobs.find(x=>x.id===job.id);if(j&&!['queued','running'].includes(j.status))break}
  }catch(e){status(e.message)}});
@@ -236,7 +403,7 @@ const geometryButton=button('立面・連続面を設定',async()=>{
  if(!await modal('立面形状・展開順（リスト順）',div))return;
  const next=clone(p);if(action.value==='remove'){if(next.faces.length===1)throw Error('最後の面は削除できません');next.faces.splice(faceIndex,1)}
  else{const q={...clone(f),id:form.id.value,group:form.group.value,origin:form.origin.value.split(',').map(Number),azimuth:+form.azimuth.value,projectionEvidence:form.evidence.value};if(action.value==='add'){q.features=[];for(const k of ['mesh','surfaceTriangles','reference','outline'])delete q[k];next.faces.push(q)}else next.faces[faceIndex]=q}
- await call('solve',{spec:next});remember();p=next;faceIndex=Math.min(faceIndex,p.faces.length-1);fields();await calc()
+ await call('solve',{spec:next,pid});remember();p=next;faceIndex=Math.min(faceIndex,p.faces.length-1);fields();await calc()
 });$('face').parentElement.append(geometryButton);
 const costsButton=button('単価・加工・予算条件',async()=>{
  const div=node('div'),budget=field(div,'案件予算（円、未設定は空欄）',p.budget??''),source=field(div,'見積書の番号・版',p.priceSource||'');
@@ -256,7 +423,7 @@ const costsButton=button('単価・加工・予算条件',async()=>{
   if(confirmed.value==='yes'&&(Object.keys(spec).length!==5||!Number.isInteger(spec.pack)||spec.pack<1||spec.maxLength<=2*spec.fold+spec.kerf))throw Error(col+' の加工確認には有効な5項目が必要です');
   if(Object.keys(spec).length)next.fabrication[col]={...spec,confirmed:confirmed.value==='yes'};else delete next.fabrication[col];
  }
- await call('solve',{spec:next});remember();p=next;fields();await calc()
+ await call('solve',{spec:next,pid});remember();p=next;fields();await calc()
 });$('limit').parentElement.append(costsButton);
 const passButton=button('CG用の視点・深度・色領域を記録',async()=>{
  await page('scene');view3();const list={};
@@ -282,7 +449,21 @@ $('compare').after(button('同じ方向の立面を並べて比較',async()=>{
  try{const ix=rr.spec.faces.findIndex(f=>f.id===id);if(ix<0)throw Error('旧版にこの立面はありません');r=rr.result;p=rr.spec;faceIndex=ix;paint();stamp('r'+chosen()+' / '+id)}finally{r=cur;p=current;faceIndex=i;paint()}stamp('編集中 / '+id);await modal('立面比較',div,'確認')
 }));
 $('spaces').after(button('実案件の工数・費用を比較',async()=>{
- const {evaluate}=await import('./benchmark.js');
+ const {evaluate,annualReturn}=await import('./benchmark.js');
+ if(p.intentPlanVersion){
+  const div=node('div'),items=[
+   ['manualHours','手作業の実働時間 h'],['systemHours','システム利用時の実働時間 h'],['hourlyRate','社内時間単価 円/h'],
+   ['manualVendor','手作業時の外注費 円/件'],['systemVendor','利用時の外注費 円/件'],['running','モデル等の従量費 円/件'],
+   ['investment','初期投資 円'],['projects','年間適用件数'],['fixed','年間固定運用費 円']];
+  const source=field(div,'比較した案件・同じ作業の記録',p.evaluation?.source||'');
+  const inputs=items.map(([key,title])=>{const input=field(div,title,p.evaluation?.[key]??'');input.type='number';input.step='any';input.min=0;return [key,input]});
+  if(!await modal('実測値による年間効果',div,'試算を保存'))return;
+  if(!source.value.trim()||inputs.some(([,i])=>!i.value.trim()||!i.checkValidity()))throw Error('実測値と比較元を入力してください');
+  const values=Object.fromEntries(inputs.map(([key,i])=>[key,Number(i.value)]));
+  if(!Number.isSafeInteger(values.projects))throw Error('年間件数は整数で入力してください');
+  const result=annualReturn(values,values.projects,values.fixed);remember();p.evaluation={...values,...result,source:source.value.trim()};
+  status('年間純効果 '+result.annualNet.toLocaleString()+' 円 ／ 回収年数 '+(result.years===null?'算出不可':result.years.toFixed(2)+' 年'));return;
+ }
  const values=p.measurement||{manualHours:0,systemHours:0,hourlyRate:0,manualVendor:0,systemVendor:0,running:0,manualDays:0,systemDays:0,investment:0};
  await editText('実測値（時間・円・日）',JSON.stringify(values,null,2),async t=>{const v=JSON.parse(t);if(!Object.keys(values).every(k=>Number.isFinite(v[k])&&v[k]>=0))throw Error('0以上の実測値を入力してください');remember();p.measurement=v;p.roi=evaluate(v);status('削減 '+p.roi.hoursSaved+' 時間 / '+p.roi.netSaving+' 円、回収目安 '+(p.roi.breakEven??'算出不可')+' 案件')})
 }));
@@ -299,7 +480,7 @@ $('edit').parentElement.append(button('移行元を照合・確認',async()=>{
  if(await modal('移行元・図面を照合',div,'確認済みにする')){if(!evidence.value.trim())throw Error('照合根拠を記入してください');remember();p.migrationConfirmed=evidence.value.trim()}
 }));
 $('brush').after(button('構件の座標・種別を編集',async()=>{
- const f=p.faces[faceIndex];await editText(f.id+' · 構件リスト（左上原点 mm）',JSON.stringify(f.features,null,2),async t=>{const q=clone(p);q.faces[faceIndex].features=JSON.parse(t);await call('solve',{spec:q});remember();p=q;fields();await calc()})
+ const f=p.faces[faceIndex];await editText(f.id+' · 構件リスト（左上原点 mm）',JSON.stringify(f.features,null,2),async t=>{const q=clone(p);q.faces[faceIndex].features=JSON.parse(t);await call('solve',{spec:q,pid});remember();p=q;fields();await calc()})
 }));
 const fgInput=node('input');fgInput.type='file';fgInput.accept='image/png';const fgLabel=node('label','前景遮蔽（透過PNG）');fgLabel.append(fgInput);$('background').parentElement.after(fgLabel);
 fgInput.onchange=async()=>{try{const f=fgInput.files[0];if(!f)return;if(!background)throw Error('先に背景写真を指定してください');foreground=await image(await fileData(f));p.photo.foreground=await uploadFile(f);await compose()}catch(e){status(e.message)}};
@@ -340,7 +521,7 @@ $('brush').after(button('構件を寸法で入力',async()=>{
   if(feat.kind==='berth'){if(!/^\d{1,3}$/.test(name.value)||Number(name.value)<1)throw Error('バース番号は1〜999');feat.number=Number(name.value)}
   target.features.push(feat);
  }else target.features.splice(Number(remove.value),1);
- await call('solve',{spec:next});remember();p=next;fields();await calc()
+ await call('solve',{spec:next,pid});remember();p=next;fields();await calc()
 }));
 $('wave').after(button('余白・領域別の波形',async()=>{
  const div=node('div'),choices=[['','指定なし'],...[...$('wave').options].map(o=>[o.value,o.text])];
@@ -349,7 +530,7 @@ $('wave').after(button('余白・領域別の波形',async()=>{
  if(!await modal('縦貼り3ステップ｜別冊 P.31–33',div))return;
  const next=clone(p);next.mode='wave';next.waveSequence=boxes.map(i=>i.value).filter(Boolean);
  if(blank.value.trim())next.blankCols=blank.value.split(/[,、，]/).map(v=>Number(v)-1);else delete next.blankCols;
- await call('solve',{spec:next});remember();p=next;fields();await calc()
+ await call('solve',{spec:next,pid});remember();p=next;fields();await calc()
 }));
 
 $('rules').parentElement.after(button('A/B/C 位図・公式配列を照合',async()=>{const div=node('div');patternComparison(div,await call('patterns'));await modal('主指南 P.18・20 と提案書の照合',div,'閉じる')}));

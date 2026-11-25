@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """M.A.D.E. isolated local service. Standard library, Python 3.9+."""
+import threading
 import argparse,base64,concurrent.futures,datetime,getpass,hashlib,hmac,io,json,os,re,secrets,sqlite3,threading,time,urllib.request,urllib.parse,webbrowser,zipfile
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 from contextlib import contextmanager
 from engine.layout import solve,digest
+from engine import jobs as artifact_jobs
 from engine.formats import dxf,xlsx,glb
 ROOT=Path(__file__).resolve().parent
 WEB=ROOT/'web'
 DATA=ROOT/'private'
 PREFIX='/api/made/v1/'
 roles=('admin','designer','reviewer','sales','procurement','cg')
+pilot_jobs_active=threading.Event()
 pool=concurrent.futures.ThreadPoolExecutor(max_workers=2)
 def js(x):return json.dumps(x,ensure_ascii=False,allow_nan=False)
 def code():return secrets.token_hex(10)
@@ -45,7 +48,10 @@ def setup(resume=True):
         CREATE TABLE IF NOT EXISTS file(id text primary key,pid text,name text,sha text,size integer);
         CREATE TABLE IF NOT EXISTS task(id text primary key,pid text,n int,kind text,status text,msg text,args text,created datetime default current_timestamp,unique(pid,n,kind,args));
         """)
-        if resume:c.execute("update task set status='queued' where status='running'")
+        if artifact_jobs.installed(c):pilot_jobs_active.set()
+        if resume:
+            legacy_filter=' and id not in (select id from artifact_lease)' if artifact_jobs.installed(c) else ''
+            c.execute("update task set status='queued' where status='running'"+legacy_filter)
         ids=[r[0] for r in c.execute("select id from task where status='queued'")]
     if resume:
         for k in ids:pool.submit(run_job,k)
@@ -63,8 +69,36 @@ def get_project(c,p,u):
     allow(row and (u['role']=='admin' or c.execute('select 1 from membership where pid=? and name=?',(p,u['name'])).fetchone()))
     return row
 def config():return json.loads((DATA/'gateway.json').read_text()) if (DATA/'gateway.json').is_file() else {}
-def external(kind,body,p):
-    cfg=config();url=cfg.get(kind+'Url','')
+def pilot_channels(cfg):
+    channels={}
+    if cfg.get('approved') is not True:return channels
+    for kind,record in cfg.get('verifiedChannels',{}).items():
+        if kind not in ('text','image') or not isinstance(record,dict):continue
+        provider=cfg.get('provider','gateway')
+        url=('https://api.openai.com/v1/'+('responses' if kind=='text' else 'images/edits')
+             if provider=='openai' else cfg.get(kind+'Url',''))
+        if not url.startswith('https://') or record.get('endpoint')!=url:continue
+        if record.get('model')!=cfg.get(kind+'Model') or not record.get('model'):continue
+        if not all(isinstance(record.get(k),str) and record[k].strip()
+                   for k in ('account','contract','region','retention','sampleTest','expires')):continue
+        try:expires=datetime.date.fromisoformat(record['expires'])
+        except ValueError:continue
+        if expires<datetime.datetime.now(datetime.timezone.utc).date():continue
+        channels[kind]=dict(id=digest([provider,kind,record,cfg.get('token','')]),model=record['model'],account=record['account'],
+                            region=record['region'],expires=record['expires'])
+    return channels
+
+
+def authorized_channel(cfg,kind,spec):
+    channel=pilot_channels(cfg).get(kind)
+    need(channel and spec.get('externalConsent') is True and
+         spec.get('channelGrants',{}).get(kind)==channel['id'],'案件の接続先・契約と外部送信許諾を確認してください')
+    return channel
+
+
+def external(kind,body,p,cfg=None):
+    if cfg is None:cfg=config()
+    url=cfg.get(kind+'Url','')
     need(p.get('externalConsent') is True and cfg.get('approved') is True,'外部処理は未承認または未設定です')
     if cfg.get('provider')=='openai':
         from engine.gateway import commercial
@@ -82,14 +116,78 @@ def asset(c,p,key):
     need(row,'この案件に素材がありません')
     return row,DATA/'files'/row['sha']
 
+def solve_revision(c, project, spec):
+    from engine.intent import enabled, geometry_input, solve_intent
+    active=enabled(spec)
+    if active and 'intentDraft' not in spec and spec.get('forkedIntentResult'):
+        row=c.execute('select spec,result from revision where pid=? and n=1',(project['id'],)).fetchone()
+        need(row,'派生元の版がありません')
+        source=json.loads(row['spec'])
+        result=json.loads(row['result'])
+        need(source.get('forkedIntentResult')==spec['forkedIntentResult']==result['resultId']
+             and geometry_input(source)==geometry_input(spec),'派生元の条件が変わりました。意図計画を解除してください')
+        return result
+    if not active or 'intentDraft' not in spec:
+        return solve(spec)
+    draft=spec['intentDraft']
+    need(isinstance(draft,dict) and type(draft.get('revisionId')) is int,'基準版を選択してください')
+    row=c.execute('select spec,result from revision where pid=? and n=?',
+                  (project['id'],draft['revisionId'])).fetchone()
+    need(row,'案件内の基準版を選択してください')
+    source=json.loads(row['spec'])
+    need(enabled(source) and geometry_input(source)==geometry_input(spec),
+         '設計条件が変わりました。意図計画を解除して基準版を保存し、再作成してください')
+    # Reuse the archived selection for presentation-only edits and historical replay.
+    for saved in c.execute('select n,spec from revision where pid=? and n>? order by n desc',
+                           (project['id'],draft['revisionId'])):
+        archived=json.loads(saved['spec'])
+        if archived.get('intentPlanVersion')==spec['intentPlanVersion'] and digest(archived.get('intentDraft'))==digest(draft) and geometry_input(archived)==geometry_input(spec):
+            return json.loads(c.execute('select result from revision where pid=? and n=?',
+                                        (project['id'],saved['n'])).fetchone()[0])
+    base=json.loads(row['result'])
+    from engine.intent import RULE_HASH
+    need(base.get('dependencies',{}).get('ruleHash',RULE_HASH)==RULE_HASH,
+         '基準版の規則内容が異なります。規則の更新を照査してください')
+    return solve_intent(spec,draft,base)
+
+
+def renew_job(key,token,stop):
+    while not stop.wait(artifact_jobs.LEASE_SECONDS/3):
+        with db() as c:
+            if not artifact_jobs.renew(c,key,token):return
+
+
+class PilotHTTPServer(ThreadingHTTPServer):
+    next_recovery=0
+    def service_actions(self):
+        if not pilot_jobs_active.is_set() or time.monotonic()<self.next_recovery:return
+        self.next_recovery=time.monotonic()+10
+        try:
+            with db() as c:pending=artifact_jobs.recover(c)
+        except sqlite3.OperationalError:
+            return
+        outstanding=getattr(self,'pending_exports',{})
+        self.pending_exports={k:v for k,v in outstanding.items() if not v.done()}
+        for key in pending:
+            if key not in self.pending_exports:self.pending_exports[key]=pool.submit(run_job,key)
+
+
 def run_job(key):
     lease=code();tmp=DATA/(key+'-'+lease+'.tmp');final=DATA/(key+'.bin')
+    heartbeat=None
     try:
         with db() as c:
+            c.execute('begin immediate')
+            if not c.execute("select 1 from task where id=? and status='queued'",(key,)).fetchone():return
+            ownership=artifact_jobs.acquire(c,key,lease)
+            if ownership=='wait':return
             if not c.execute("update task set status='running',msg=? where id=? and status='queued'",(lease,key)).rowcount:return
             job=dict(c.execute('select * from task where id=?',(key,)).fetchone())
             row=c.execute('select * from revision where pid=? and n=?',(job['pid'],job['n'])).fetchone()
             p=json.loads(row['spec']);r=json.loads(row['result']);state=row['state'];args=json.loads(job['args'])
+        if ownership=='owned':
+            heartbeat=threading.Event()
+            threading.Thread(target=renew_job,args=(key,lease,heartbeat),daemon=True).start()
         kind=job['kind'];state=args.get('exportState',state)
         def load_asset(aid):
             with db() as conn:return asset(conn,job['pid'],aid)[1].read_bytes()
@@ -101,7 +199,7 @@ def run_job(key):
                 z.writestr('drawing.dxf',dxf(p,r,state))
                 z.writestr('materials.xlsx',xlsx(p,r,state))
                 z.writestr('manifest.json',js(dict(project=job['pid'],revision=job['n'],resultId=r['resultId'],state=state,
-                    usage='承認済' if state=='approved' else '検討用',engine=r.get('engineVersion','3.0.x'),exportVersion='3.1.0',rules=p['rules'],masters=p.get('policyRefs',{}),drawingSource=p.get('drawingSource',''),units='mm')))
+                    usage='承認済' if state=='approved' else '検討用',engine=r.get('engineVersion','3.0.x'),exportVersion=args.get('exportVersion','3.1.0'),rules=p['rules'],masters=p.get('policyRefs',{}),drawingSource=p.get('drawingSource',''),units='mm',**({'dependencies':r['dependencies']} if r.get('dependencies') else {}))))
             raw=out.getvalue()
         elif kind=='cg':
             out=io.BytesIO()
@@ -116,11 +214,24 @@ def run_job(key):
             raw=out.getvalue()
         else:raise ValueError('形式が不正です')
         tmp.write_bytes(raw)
+        checksum=None
+        if ownership=='owned':
+            checksum=hashlib.sha256(raw).hexdigest()
+            with tmp.open('rb') as stream:
+                actual=hashlib.sha256()
+                for chunk in iter(lambda:stream.read(1024*1024),b''):actual.update(chunk)
+            need(actual.hexdigest()==checksum,'一時出力の内容が一致しません')
         with db() as c:
-            if c.execute("update task set status='ready',msg='' where id=? and status='running' and msg=?",(key,lease)).rowcount:tmp.replace(final)
+            if ownership=='owned' and not artifact_jobs.renew(c,key,lease):return
+            if c.execute("update task set status='ready',msg='' where id=? and status='running' and msg=?",(key,lease)).rowcount:
+                if ownership=='owned':
+                    c.execute('update artifact_lease set sha256=?,token=null,until=0 where id=? and token=?',
+                              (checksum,key,lease))
+                tmp.replace(final)
     except Exception as e:
         with db() as c:c.execute("update task set status='failed',msg=? where id=? and status='running' and msg=?",(str(e)[:200],key,lease))
     finally:
+        if heartbeat is not None:heartbeat.set()
         if tmp.exists():tmp.unlink()
 
 class Handler(BaseHTTPRequestHandler):
@@ -209,7 +320,12 @@ class Handler(BaseHTTPRequestHandler):
                 from engine.legacy import migrate
                 self.reply(migrate(b['document']));return
             if route=='solve' and self.command=='POST':
-                self.reply(solve(b['spec']));return
+                spec=b['spec']
+                if spec.get('intentPlanVersion') is not None:
+                    project=get_project(c,b.get('pid',''),u)
+                    self.reply(solve_revision(c,project,spec))
+                else:self.reply(solve(spec))
+                return
             pid=q.get('pid',[b.get('pid','')])[0];project=get_project(c,pid,u)
             if self.command=='GET':
                 if route=='project':
@@ -225,6 +341,25 @@ class Handler(BaseHTTPRequestHandler):
                     ext='zip' if row['kind'] in ('cg','cadbom') else row['kind']
                     self.reply((DATA/(row['id']+'.bin')).read_bytes(),'application/octet-stream',headers={'Content-Disposition':f'attachment; filename="Marq-r{row["n"]}-{row["id"]}.{ext}"'});return
             if self.command!='POST':raise ValueError('未知の操作')
+            if route=='pilot-channels':
+                allow(role in ('admin','designer'));self.reply(pilot_channels(config()));return
+            if route=='intent-plan':
+                from engine.intent import propose
+                allow(role in ('admin','designer'))
+                row=c.execute('select spec from revision where pid=? and n=?',(pid,b['n'])).fetchone()
+                need(row,'保存済みの案件版を選択してください')
+                spec=json.loads(row['spec'])
+                plan=propose(spec,b['n'],b['faceId'],b['goal'])
+                if b.get('via')=='text':
+                    from engine.intent import validate
+                    need(b['n']==project['head'],'外部送信は保存済みの最新版から実行してください')
+                    cfg=config();authorized_channel(cfg,'text',spec)
+                    suggestion=external('text',dict(task='intent-regions-v1',goal=plan['goal'],
+                        observer=plan['observer'],quietIntervals=plan['quietIntervals'],peaks=plan['peaks']),spec,cfg)
+                    need(isinstance(suggestion,dict) and set(suggestion)=={'quietIntervals','peaks'},'AI案の範囲を確認してください')
+                    plan.update(suggestion);validate(spec,plan)
+                    audit(c,pid,b['n'],name,'gateway intent-regions-v1');c.commit()
+                self.reply(plan);return
             if route=='file':
                 allow(role in ('admin','designer','cg','reviewer'));size=len(data);sha=hashlib.sha256(data).hexdigest();aid=code();dest=DATA/'files'/sha
                 temp=DATA/'files'/aid;temp.write_bytes(data);temp.replace(dest)
@@ -246,8 +381,17 @@ class Handler(BaseHTTPRequestHandler):
                     if typ=='rules':need(p['rules']==policy.get('bitsVersion'),'選択した位図が承認マスタと異なります')
                     if typ=='landscape':need(p.get('landscape')==policy and all(f.get('limit',p.get('limit'))==policy.get('limit') and f.get('denominator','net')==policy.get('denominator','net') for f in p['faces']),'景観条件が承認版と異なります')
                     if typ=='catalog':need(all(p.get(a,{})==policy.get(b,{}) for a,b in [('catalog','products'),('prices','prices'),('fabrication','fabrication'),('approvedSamples','approvedSamples')]),'単価・品番が承認マスタと異なります')
-                result=solve(p);n=b['expectedRevision']+1
+                result=solve_revision(c,project,p);n=b['expectedRevision']+1
                 if not c.execute('update project set head=?,name=? where id=? and head=?',(n,p['name'][:100],pid,n-1)).rowcount:raise FileExistsError('他の担当者が保存済みです。最新版を確認してください')
+                if p.get('intentPlanVersion')==1:
+                    from engine.intent import revision_dependencies
+                    snapshot=revision_dependencies(p,result,n-1 or None)
+                    if n>1:
+                        parent=c.execute('select state,result from revision where pid=? and n=?',(pid,n-1)).fetchone()
+                        previous=json.loads(parent['result']).get('dependencies',{})
+                        if previous.get('geometryHash')==snapshot['geometryHash'] and previous.get('quantityHash')==snapshot['quantityHash']:
+                            snapshot['geometryReviewRevision']=n-1 if parent['state']=='approved' else previous.get('geometryReviewRevision')
+                    result['dependencies']=snapshot
                 c.execute('insert into revision values(?,?,?,?,?,?)',(pid,n,'draft',js(p),js(result),name))
                 audit(c,pid,n,name,'save');out=dict(n=n,resultId=result['resultId'])
             elif route=='fork':
@@ -264,7 +408,15 @@ class Handler(BaseHTTPRequestHandler):
                     if isinstance(v,dict):return {k:maprefs(w) for k,w in v.items()}
                     if isinstance(v,list):return [maprefs(w) for w in v]
                     return remap.get(v,v) if isinstance(v,str) else v
-                spec=maprefs(spec);result=solve(spec)
+                spec=maprefs(spec)
+                if 'intentFacts' in result:
+                    # The immutable source belongs to the old project. Carry its verified selection into the branch.
+                    spec.pop('intentDraft',None)
+                    spec['forkedIntentResult']=result['resultId']
+                else:result=solve(spec)
+                if spec.get('intentPlanVersion')==1:
+                    from engine.intent import revision_dependencies
+                    result['dependencies']=revision_dependencies(spec,result,None)
                 c.execute('insert into revision values(?,?,?,?,?,?)',(new,1,'draft',js(spec),js(result),name));audit(c,new,1,name,'fork '+pid);out=dict(id=new)
             elif route=='member':
                 allow(role=='admin');need(c.execute('select name from users where name=?',(b['name'],)).fetchone(),'登録済みユーザーを指定してください')
@@ -285,14 +437,16 @@ class Handler(BaseHTTPRequestHandler):
                 audit(c,pid,n,name,target+' '+b.get('evidence','')[:300]);out={'ok':True}
             elif route=='job':
                 n=b['n'];kind=b['kind'];args=b.get('args',{});need(kind in ('cg','xlsx','glb','dxf','cadbom'),'形式が不正です')
-                rr=c.execute('select state from revision where pid=? and n=?',(pid,n)).fetchone();need(rr,'版がありません')
+                rr=c.execute('select state,spec from revision where pid=? and n=?',(pid,n)).fetchone();need(rr,'版がありません')
                 if kind=='cg':
                     allow(role in ('admin','designer','sales'));need(rr[0]=='approved' and args.get('team') and args.get('due'),'承認済みの版・宛先・希望納期を指定してください')
                     spec=json.loads(c.execute('select spec from revision where pid=? and n=?',(pid,n)).fetchone()[0])
                     need(set(args.get('assets',[]))<=set(spec.get('assets',[])),'承認版に含まれる素材のみ指定できます')
                     if team:need(args.get('rightsConfirmed') is True,'委託先・素材利用条件を確認してください')
+                if args.get('approvedOnly') is True:need(rr['state']=='approved','承認済みの版を選択してください')
+                pilot=json.loads(rr['spec']).get('intentPlanVersion')==1
                 args=dict(args,exportState=rr[0])
-                if kind in ('dxf','xlsx','cadbom'):args['exportVersion']='3.1.0'
+                if kind in ('dxf','xlsx','cadbom'):args['exportVersion']='3.1.0+intent1' if pilot else '3.1.0'
                 canon=json.dumps(args,sort_keys=True,ensure_ascii=False)
                 c.execute('begin immediate')
                 if kind=='cg':
@@ -301,7 +455,10 @@ class Handler(BaseHTTPRequestHandler):
                 key=old[0] if old else code()
                 c.execute('insert or ignore into task(id,pid,n,kind,status,msg,args) values(?,?,?,?,?,?,?)',(key,pid,n,kind,'queued','',canon))
                 row=c.execute('select id from task where pid=? and n=? and kind=? and args=?',(pid,n,kind,canon)).fetchone()
-                key=old[0] if old else row[0];audit(c,pid,n,name,'job '+key);c.commit();pool.submit(run_job,key);out=dict(id=key)
+                key=old[0] if old else row[0]
+                if pilot:
+                    artifact_jobs.register(c,key);pilot_jobs_active.set()
+                audit(c,pid,n,name,'job '+key);c.commit();pool.submit(run_job,key);out=dict(id=key)
             elif route=='jobStatus':
                 job=c.execute('select * from task where id=? and pid=?',(b['id'],pid)).fetchone();need(job,'発注がありません')
                 target=b['state'];valid={'queued':['cancelled'],'running':['cancelled'],'failed':['queued'],'cancelled':['queued'],'ready':['accepted'],'accepted':['proof'],'proof':['changes','delivered'],'changes':['proof'],'delivered':['verified']}
@@ -312,6 +469,8 @@ class Handler(BaseHTTPRequestHandler):
                     need(info['size']>=24,'8K納品画像の寸法を確認してください')
                     with source.open('rb') as stream:header=stream.read(24)
                     need(header[:8]==bytes.fromhex('89504e470d0a1a0a') and max(int.from_bytes(header[16:20],'big'),int.from_bytes(header[20:24],'big'))>=7680,'8K納品は長辺7680px以上のPNGを指定してください')
+                if target=='queued' and artifact_jobs.installed(c):
+                    c.execute('update artifact_lease set attempts=0,until=0,token=null where id=?',(job['id'],))
                 message=job['msg'] if target=='verified' else (b['asset'] if target=='delivered' else '')
                 need(c.execute('update task set status=?,msg=? where id=? and status=?',(target,message,job['id'],job['status'])).rowcount,'状態が更新されました')
                 audit(c,pid,job['n'],name,'order '+target);c.commit()
@@ -319,7 +478,21 @@ class Handler(BaseHTTPRequestHandler):
                 out={'ok':True}
             elif route=='ai':
                 allow(role in ('admin','designer','sales'));purpose=b['kind'];need(purpose in ('image','text'),'AI種別が不正です')
-                p=b['spec'];need(project['head']>0,'案件を保存し、外部送信を許可した版を選択してください');saved=json.loads(c.execute('select spec from revision where pid=? and n=?',(pid,project['head'])).fetchone()[0]);need(saved.get('externalConsent') and p.get('externalConsent'),'現在版の外部送信が許可されていません');out=external(purpose,b['payload'],p);audit(c,pid,0,name,'gateway '+purpose)
+                p=b['spec'];need(project['head']>0,'外部送信を許可した版を保存してください')
+                saved=json.loads(c.execute('select spec from revision where pid=? and n=?',(pid,project['head'])).fetchone()[0])
+                need(saved.get('externalConsent') and p.get('externalConsent'),'現在版の外部送信が許可されていません')
+                cfg=config()
+                if saved.get('intentPlanVersion') or p.get('intentPlanVersion'):
+                    need(purpose=='image','意図計画から承認済みの文章接続先を選択してください')
+                    authorized_channel(cfg,purpose,saved)
+                    need(b.get('n')==project['head'],'対象版を保存して選び直してください')
+                    photo=saved.get('photo',{});rights=photo.get('rights',{})
+                    need(isinstance(rights.get('source'),str) and rights['source'].strip() and rights.get('external') is True and
+                         photo.get('background') and rights.get('background')==photo['background'] and
+                         rights.get('foreground')==photo.get('foreground'),'写真・前景の使用許諾を確認してください')
+                    for key in ('photo','model','light','faces','intentDraft','camera'):
+                        need(p.get(key)==saved.get(key),'保存版と構図・素材が異なります。新しい版を保存してください')
+                out=external(purpose,b['payload'],p,cfg);audit(c,pid,project['head'],name,'gateway '+purpose)
             else:raise ValueError('未知の操作')
             c.commit();self.reply(out)
     def do_GET(self):self.guarded()
@@ -351,6 +524,10 @@ def main():
                     z.extract(info,folder)
             with sqlite3.connect(folder/'made.sqlite') as c:
                 need(c.execute('pragma integrity_check').fetchone()[0]=='ok','DBの整合性を確認できません');c.execute('delete from sessions')
+                if artifact_jobs.installed(c):
+                    for key,sha in c.execute('select id,sha256 from artifact_lease where sha256 is not null'):
+                        obj=folder/(key+'.bin')
+                        need(obj.is_file() and hashlib.sha256(obj.read_bytes()).hexdigest()==sha,'出力ファイル不整合')
                 for sha, in c.execute('select distinct sha from file'):need((folder/'files'/sha).is_file() and hashlib.sha256((folder/'files'/sha).read_bytes()).hexdigest()==sha,'素材ファイル不整合')
             folder.rename(DATA)
         return
@@ -371,7 +548,7 @@ def main():
                 z.write(snap,'made.sqlite')
                 for f in list((DATA/'files').glob('*'))+list(DATA.glob('*.bin')):z.write(f,str(f.relative_to(DATA)))
         return
-    http=ThreadingHTTPServer(('127.0.0.1',a.port),Handler)
+    http=PilotHTTPServer(('127.0.0.1',a.port),Handler)
     http.allowed_hosts={'localhost:'+str(a.port),'127.0.0.1:'+str(a.port)}
     if a.public_host:
         with db() as c:need(c.execute('select count(*) from users').fetchone()[0]>0,'外部ホストには組織ユーザーの設定が必要です')

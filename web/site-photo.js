@@ -35,3 +35,30 @@ export function finishEdit(edited,controls,building,foreground){
  if(foreground)ctx.drawImage(foreground,0,0,w,h);
  return canvas;
 }
+
+// Coordinates are measured in the saved composition, after the same crop and placement as the building.
+export function checkpointResidual(worldToLayer,worldMM,pixel,w,h,layer,settings){
+ if(!worldMM.every(Number.isFinite)||!pixel.every(Number.isFinite)||pixel[0]<0||pixel[0]>=w||pixel[1]<0||pixel[1]>=h)
+  throw Error('世界座標 mm と画面内の画像座標 px を確認してください');
+ const [u,v]=worldToLayer(worldMM),[left,top,width,height]=placement(w,h,layer,settings);
+ const predicted=[left+u*width,top+v*height];
+ return {worldMM,pixel,predicted,errorPX:Math.hypot(predicted[0]-pixel[0],predicted[1]-pixel[1])};
+}
+
+export function verifyProtected(canvas,controls,building,foreground){
+ const {w,h,pos}=controls,protectedLayer=surface(w,h),ctx=protectedLayer.getContext('2d');
+ ctx.drawImage(building,...pos);
+ if(foreground)ctx.drawImage(foreground,0,0,w,h);
+ const ref=ctx.getImageData(0,0,w,h).data,actual=canvas.getContext('2d').getImageData(0,0,w,h).data;
+ let interior=0,edge=0;
+ for(let i=0;i<ref.length;i+=4){
+  if(!ref[i+3])continue;
+  // Partially transparent overlays depend on the edited background. Review their boundary separately.
+  if(ref[i+3]!==255){edge++;continue}
+  interior++;
+  if(ref[i]!==actual[i]||ref[i+1]!==actual[i+1]||ref[i+2]!==actual[i+2]||actual[i+3]!==255)
+   throw Error('保護領域の画素が一致しません。設計確認図をご利用ください');
+ }
+ if(!interior)throw Error('検査できる保護領域がありません');
+ return {interior,edge};
+}
