@@ -33,6 +33,19 @@ if(!/^\d+$/.test(port))throw Error('Usage: node pilot.cjs TEST_PORT');
   if(!detected||report.interior!==106)throw Error('pixel mismatch QA '+JSON.stringify(report));
   return report;
  });
- console.log(pixels,await page.locator('#jobs').textContent(),errors);if(errors.length)throw Error(errors.join(','));
+ const jobText=await page.locator('#jobs').textContent();
+ await page.locator('summary').filter({hasText:'案件データ・旧版の取込'}).click();
+ const saved=page.waitForEvent('download');await page.click('#jsonOut');
+ const reference=JSON.parse(require('node:fs').readFileSync(await (await saved).path(),'utf8'));
+ if(reference.schema!=='made-revision-reference-v1'||reference.revision!==2)throw Error('unexpected revision reference');
+ await page.locator('#jsonIn').setInputFiles({name:'reference.json',mimeType:'application/json',buffer:Buffer.from(JSON.stringify(reference))});
+ await page.waitForFunction(()=>document.querySelector('#version').textContent.includes('r1 · draft')&&document.querySelector('#name').value.includes('複製'));
+ const branch=await page.evaluate(async()=>{
+  const projects=await (await fetch('/api/made/v1/projects')).json();
+  const project=projects.filter(p=>p.name===document.querySelector('#name').value).at(-1);
+  return (await fetch('/api/made/v1/revision?pid='+project.id+'&n=1')).json();
+ });
+ if(branch.result.resultId!==reference.resultId)throw Error('fork changed archived solution');
+ console.log(pixels,jobText,'reference import PASS',errors);if(errors.length)throw Error(errors.join(','));
  }finally{await browser.close()}
 })().catch(e=>{console.error(e);process.exitCode=1});
