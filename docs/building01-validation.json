@@ -1,0 +1,117 @@
+{
+  "resultId": "f534131efb638b7cc935e9c4",
+  "elapsedSeconds": 0.9568869800000357,
+  "faces": [
+    {
+      "face": "West",
+      "width": 55000,
+      "height": 28800,
+      "finishes": {
+        "Silver": 1329254200.0000002,
+        "Slate Navy": 252545800.00000006
+      },
+      "visible": {
+        "Silver": 1329254200.0000002,
+        "Slate Navy": 252545800.00000006
+      },
+      "ratio": 15.965722594512583,
+      "panels": 468
+    },
+    {
+      "face": "East",
+      "width": 55000,
+      "height": 28800,
+      "finishes": {
+        "Silver": 1329255000.0000005,
+        "Slate Navy": 252545000.0
+      },
+      "visible": {
+        "Silver": 1329255000.0000005,
+        "Slate Navy": 252545000.0
+      },
+      "ratio": 15.965672019218607,
+      "panels": 468
+    },
+    {
+      "face": "South",
+      "width": 55020,
+      "height": 28800,
+      "finishes": {
+        "Silver": 1329640001.500001,
+        "Slate Navy": 254362500.00000012
+      },
+      "visible": {
+        "Silver": 1329640001.500001,
+        "Slate Navy": 254362500.00000012
+      },
+      "ratio": 16.058213276754724,
+      "panels": 468
+    },
+    {
+      "face": "North",
+      "width": 55020,
+      "height": 24490.0,
+      "finishes": {
+        "Silver": 1008459399.0,
+        "Slate Navy": 199150999.99999982
+      },
+      "visible": {
+        "Silver": 1008459399.0,
+        "Slate Navy": 199150999.99999982
+      },
+      "ratio": 16.491328673959178,
+      "panels": 366
+    }
+  ],
+  "parts": 14684,
+  "dxfEntities": 50480,
+  "dxfAuditErrors": 0,
+  "dxfUnit": "mm",
+  "xlsxSheets": [
+    "案件",
+    "立面別",
+    "板明細",
+    "日鉄鋼板",
+    "ヨドコウ",
+    "アイジー工業",
+    "下料明細",
+    "発注検討",
+    "納まり・審査"
+  ],
+  "glbBytes": 1028624,
+  "glbUnit": "m",
+  "accessors": [
+    {
+      "bufferView": 0,
+      "componentType": 5126,
+      "count": 72003,
+      "type": "VEC3",
+      "min": [
+        -27.532,
+        0.0,
+        -23.733
+      ],
+      "max": [
+        27.508,
+        31.49,
+        31.267
+      ]
+    },
+    {
+      "bufferView": 1,
+      "componentType": 5126,
+      "count": 13617,
+      "type": "VEC3",
+      "min": [
+        -27.512,
+        0.3,
+        -23.733
+      ],
+      "max": [
+        27.488000000000003,
+        31.49,
+        31.267
+      ]
+    }
+  ]
+}
